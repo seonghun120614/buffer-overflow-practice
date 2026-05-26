@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  ubuntu-amd64:
+    build:
+      context: .
+      dockerfile: Dockerfile.amd64
+    container_name: ubuntu_x86_64
+    platform: linux/amd64
+    stdin_open: true
+    tty: true
+
+    privileged: true
+    cap_add:
+      - SYS_PTRACE
+
+  ubuntu-386:
+    build:
+      context: .
+      dockerfile: Dockerfile.386
+    container_name: ubuntu_x86_32
+    platform: linux/386
+    stdin_open: true
+    tty: true
+
+    privileged: true
+    cap_add:
+      - SYS_PTRACE
