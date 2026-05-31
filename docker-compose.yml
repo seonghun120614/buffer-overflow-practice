@@ -13,6 +13,8 @@ services:
     privileged: true
     cap_add:
       - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
 
   ubuntu-386:
     build:

